@@ -200,6 +200,12 @@ attribute_skipped ─┘
 `degrade` 用于 `attribute` `attribute_skipped`——决策记录#4 的原则：LLM/知识侧失败绝不影响校验主流程。
 `attribute` 失败时写 `attributions=[]` 并向 `messages` 追加警告，流程继续走到 `write_report`，`exit_code` 保持 0。
 
+**`enrich` 的 abort 边界（2026-08-28 评审确认）**：
+"匹配不到历史报废率/订单信息"是**正常业务场景**——对应列留空即可，不抛异常、不 abort，
+与现状 `match_history_columns` / `join_order_info` 的左连接语义一致。
+只有**匹配过程本身出错**（如 `join_order_info` 抛异常、`hist_index` 结构损坏）才走 abort。
+测试须覆盖"订单文件缺失 ⇒ `order_df is None` ⇒ `enrich` 正常通过且不写 `error`"这一路径。
+
 装饰器职责：记录节点进入、`elapsed_ms`、状态（ok/skip/fail）、节点自报的 detail 摘要、异常 traceback。
 不负责打印——stdout 进度由 `main.py` 消费 `graph.stream()` 输出，职责分离。
 `state.get("tracer")` 为 None 时（仅 `load_config` 自身）跳过写入，由该节点在创建 Tracer 后自行补记一条。
@@ -207,9 +213,14 @@ attribute_skipped ─┘
 **统一短路边**：每条出边用同一工厂函数生成，避免逐边手写路由：
 
 ```python
-def _guard(next_node):
-    return lambda s: END if s.get("error") else next_node
+def guard(next_node: str):
+    """生成"有 error 就去 END，否则去 next_node"的路由函数。"""
+    def route(state):
+        return END if state.get("error") else next_node
+    return route
 ```
+
+命名不带下划线前缀：`builder.py` 需要跨模块 import 它。
 
 ### 第 3 层：规则级隔离
 
