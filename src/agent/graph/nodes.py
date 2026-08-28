@@ -23,6 +23,7 @@ from ..llm.knowledge import B_BASE_URL, B_TIMEOUT_SECONDS, retrieve_knowledge
 from ..parsers.report_parser import (ReportParseError, ReportParser,
                                      build_product_order_index,
                                      filter_order_by_products)
+from ..reporting.report_writer import write_excel_report, write_markdown_summary
 from ..rules.replenish import RuleR2AfterBatch, RuleR3DuplicateReplenish
 from ..rules.scrap import RuleR4ScrapWithOnlineBoards
 from ..rules.warehouse_in import RuleR1WarehouseIn
@@ -262,3 +263,29 @@ def attribute_skipped(state):
         reason, msgs = "无API密钥", [SKIP_WARNING]
     return {"attributions": [], "skip_reason": reason, "messages": msgs,
             "_status": "skip", "_trace": {"reason": reason}}
+
+
+@traced_node("report")
+def write_report(state):
+    """生成 Excel 报告与 Markdown 摘要（搬运 main.py:174-183）。"""
+    settings = state.get("settings") or {}
+    out_dir = (Path(state["output_dir"]) if state.get("output_dir")
+               else PROJECT_ROOT / settings["output"]["dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    factory = state.get("factory") or "测试"
+    anomalies = state.get("anomalies") or []
+    # attribute 在 degrade 失败时不返回该键，必须防御性读取
+    attributions = state.get("attributions") or []
+    report = state["report"]
+
+    excel_path = write_excel_report(
+        anomalies, attributions,
+        str(out_dir / f"异常校验报告_{factory}_{stamp}.xlsx"), df=report.df)
+    md_path = write_markdown_summary(
+        anomalies, attributions,
+        str(out_dir / f"校验摘要_{factory}_{stamp}.md"))
+
+    return {"excel_path": excel_path, "md_path": md_path, "exit_code": 0,
+            "_trace": {"excel": excel_path, "markdown": md_path}}
