@@ -1,0 +1,20 @@
+# LLM 调用配置
+llm:
+  provider: openai-compatible  # mock | openai-compatible（DeepSeek/Claude均走OpenAI兼容接口）
+  base_url: https://api.deepseek.com/v1
+  api_key: ""                  # 留空则读环境变量 DEEPSEEK_API_KEY / CLAUDE_API_KEY
+  model: deepseek-chat
+  timeout_seconds: 60
+
+# B 项目知识检索服务（可选增强，服务不可用时自动降级，不影响校验主流程）
+knowledge:
+  base_url: http://127.0.0.1:8000
+  timeout_seconds: 15
+
+# 执行日志目录（相对项目根）
+trace:
+  dir: logs/traces
+
+# 报告输出目录（相对项目根）
+output:
+  dir: output

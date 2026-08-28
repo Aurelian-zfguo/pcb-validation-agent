@@ -1,0 +1,24 @@
+# 密钥（绝不入库）
+.env
+.env.*
+
+# 虚拟环境（换 Python 版本即失效，不应版本化）
+.venv/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# 运行时产物
+output/
+logs/
+rag_logs/
+
+# 真实生产数据（含客户名/料号，见决策记录#8）
+/*.xlsx
+/*.docx
