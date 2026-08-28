@@ -9,6 +9,7 @@ import traceback
 from pathlib import Path
 
 import pandas as pd
+from langgraph.graph import END
 
 from ..config import (PROJECT_ROOT, load_field_mapping, load_settings,
                       resolve_api_key)
@@ -289,3 +290,39 @@ def write_report(state):
 
     return {"excel_path": excel_path, "md_path": md_path, "exit_code": 0,
             "_trace": {"excel": excel_path, "markdown": md_path}}
+
+
+# ─────────────────────────── 路由函数 ───────────────────────────
+# 全部为纯读函数：只看 State、不产生副作用、不修改 State。
+# skip_reason 之类的判定留给节点，路由只回答"下一步去哪"。
+
+def guard(next_node: str):
+    """生成"有 error 就去 END，否则去 next_node"的路由函数。"""
+    def route(state):
+        return END if state.get("error") else next_node
+    return route
+
+
+def route_mode(state):
+    """双模式加载分支：--file 走测试模式，--工厂 走工厂模式。"""
+    if state.get("error"):
+        return END
+    return "parse_file" if state.get("file_path") else "parse_factory"
+
+
+def route_after_parse(state):
+    """解析失败（ReportParseError / 文件缺失 / 参数缺失）直接终止。"""
+    return END if state.get("error") else "enrich"
+
+
+def route_after_validate(state):
+    """数据驱动分支 + 降级分支。
+
+    无异常 ⇒ 没有归因的必要；无 llm_client ⇒ 无密钥，不具备归因能力。
+    两者都转 attribute_skipped，由该节点自行判定 skip_reason。
+    """
+    if state.get("error"):
+        return END
+    if not state.get("anomalies") or state.get("llm_client") is None:
+        return "attribute_skipped"
+    return "attribute"
