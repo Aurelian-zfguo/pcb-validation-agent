@@ -12,9 +12,11 @@ import pandas as pd
 
 from ..config import (PROJECT_ROOT, load_field_mapping, load_settings,
                       resolve_api_key)
-from ..data_loader import discover_files, normalize_factory
+from ..data_loader import discover_files, join_order_info, normalize_factory
 from ..engine import ValidationEngine
-from ..history_scrap import build_history_index
+from ..history_scrap import (build_history_index,
+                             enrich_anomalies_with_metrics,
+                             match_history_columns)
 from ..llm.client import MockLLMClient, OpenAICompatClient
 from ..parsers.report_parser import (ReportParseError, ReportParser,
                                      build_product_order_index,
@@ -184,3 +186,41 @@ def parse_factory(state):
                        "quality_issues": len(report.quality_issues),
                        "product_order_keys": len(report.product_order_index),
                        "hist_keys": len(hist_index)}}
+
+
+@traced_node("enrich")
+def enrich(state):
+    """多表关联（搬运 main.py:137-145）。
+
+    左连接不减少主表行。匹配不到订单/历史数据属正常业务场景——对应列留空即可，
+    不视为错误；只有关联过程本身抛异常才由 @traced_node 兜底 abort。
+    """
+    report = state["report"]
+    order_df = state.get("order_df")
+    hist_index = state.get("hist_index") or {}
+
+    order_rows = 0
+    if order_df is not None and not order_df.empty:
+        report.df = join_order_info(report.df, order_df)
+        order_rows = len(order_df)
+    if hist_index:
+        report.df = match_history_columns(report.df, hist_index)
+
+    return {"report": report,
+            "_trace": {"order_rows": order_rows, "hist_keys": len(hist_index)}}
+
+
+@traced_node("validate")
+def validate(state):
+    """数据质量问题 D0 + 规则异常（搬运 main.py:147-154）。"""
+    report, engine = state["report"], state["engine"]
+    anomalies = list(report.quality_issues) + engine.run(report)
+    anomalies = enrich_anomalies_with_metrics(anomalies, report.df)
+
+    tracer = state.get("tracer")
+    for err in engine.errors:
+        _log(tracer, "validate", "fail", err)
+
+    return {"anomalies": anomalies, "rule_errors": list(engine.errors),
+            "_trace": {"anomalies": len(anomalies),
+                       "rule_errors": len(engine.errors)}}
