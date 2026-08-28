@@ -48,10 +48,10 @@ cd "D:/Python/Claude Code/Programs/PCB生产预投业务数据校验Agent"
 - [ ] **Step 2: 验证能 import 且打印版本**
 
 ```bash
-".venv/Scripts/python.exe" -c "import langgraph, langgraph.graph as g; print('langgraph', langgraph.__version__); print(g.StateGraph, g.START, g.END)"
+".venv/Scripts/python.exe" -c "import langgraph, langgraph.graph as g; from importlib.metadata import version; print('langgraph', version('langgraph')); print(g.StateGraph, g.START, g.END)"
 ```
 
-Expected: 打印版本号与三个对象，无 traceback。
+Expected: 打印版本号与三个对象，无 traceback。（注：langgraph 1.2.x 无 `__version__` 属性，须用 `importlib.metadata.version`。）
 
 **若这一步报错（Python 3.14 不兼容、依赖冲突等），立即停止本计划，把完整报错交回讨论。不要尝试降级 Python、不要改代码绕过。**
 
@@ -156,7 +156,7 @@ PYTHONIOENCODING=utf-8 ".venv/Scripts/python.exe" -m pytest -q 2>&1 | tee baseli
 tail -3 baseline/pytest_before.txt
 ```
 
-Expected: 末尾显示 `53 passed`（原有 50 + 本任务新增 3）。若原有部分不是 50 passed，**记录实际数字**并以它为准，Task 11 按实际基线比对。
+Expected: 末尾显示 `79 passed`（既有 76 + 本任务新增 3）。**以本步记录的实际数字为准**，Task 11 按它比对——不要沿用记忆里过时的"50 测试"。
 
 - [ ] **Step 6: 固化行为基线（旧版报告产物）**
 
@@ -1855,12 +1855,12 @@ git commit -m "refactor: main.py 瘦身为 CLI 壳，流程编排交给 LangGrap
 PYTHONIOENCODING=utf-8 ".venv/Scripts/python.exe" -m pytest -q 2>&1 | tail -5
 ```
 
-Expected: **102 passed** = 原有 50 + Task 0 的 3 + 新增 graph 测试 49
+Expected: **125 passed** = 既有 76 + Task 0 的 3 + 新增 graph 测试 49
 （state 3 + 装饰器 6 + load_config 5 + parse 6 + pipeline 6 + attribute 4 + report 3 + routes 11 + builder 5）。
 
-若 Task 0 Step 5 记录的原有基线不是 50，按实际数字加总。
+以 Task 0 Step 5 记录的实际既有用例数为准：最终数 = 既有数 + 3 + 49。
 
-关键是**原有 50 个用例全绿且一个都没改过**。用下面这条确认那 16 个测试文件未被篡改
+关键是**既有用例全绿且一个都没改过**。用下面这条确认那 16 个测试文件未被篡改
 （与仓库首个提交——即 Task 0 之前的基线——比对，不依赖中间提交个数）：
 
 ```bash
