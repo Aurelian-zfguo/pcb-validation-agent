@@ -17,7 +17,9 @@ from ..engine import ValidationEngine
 from ..history_scrap import (build_history_index,
                              enrich_anomalies_with_metrics,
                              match_history_columns)
+from ..llm.attribution import attribute_anomalies
 from ..llm.client import MockLLMClient, OpenAICompatClient
+from ..llm.knowledge import B_BASE_URL, B_TIMEOUT_SECONDS, retrieve_knowledge
 from ..parsers.report_parser import (ReportParseError, ReportParser,
                                      build_product_order_index,
                                      filter_order_by_products)
@@ -224,3 +226,39 @@ def validate(state):
     return {"anomalies": anomalies, "rule_errors": list(engine.errors),
             "_trace": {"anomalies": len(anomalies),
                        "rule_errors": len(engine.errors)}}
+
+
+SKIP_WARNING = "[警告] 未配置API密钥，跳过LLM归因（报告仅含规则判定与证据）"
+
+
+@traced_node("attribute", on_error="degrade")
+def attribute(state):
+    """LLM 归因（搬运 main.py:163-171）。
+
+    B 项目知识检索的降级逻辑封装在 attribution.py 内部（服务不可用返回 None
+    自动降级），图层不重复实现。
+    """
+    settings = state.get("settings") or {}
+    kb = settings.get("knowledge", {}) if isinstance(settings, dict) else {}
+    retriever = functools.partial(
+        retrieve_knowledge,
+        base_url=kb.get("base_url", B_BASE_URL),
+        timeout=float(kb.get("timeout_seconds", B_TIMEOUT_SECONDS)))
+    attributions = attribute_anomalies(state["anomalies"], state["llm_client"],
+                                       retriever=retriever)
+    return {"attributions": attributions, "_trace": {"count": len(attributions)}}
+
+
+@traced_node("attribute", on_error="degrade")
+def attribute_skipped(state):
+    """跳过归因的显式节点。
+
+    必须是真节点而非直连 write_report：tests/test_cli_e2e.py:43 断言 trace 含
+    attribute step，跳过时也要留痕，同时让"为何无归因"可查。
+    """
+    if not state.get("anomalies"):
+        reason, msgs = "无异常", []
+    else:
+        reason, msgs = "无API密钥", [SKIP_WARNING]
+    return {"attributions": [], "skip_reason": reason, "messages": msgs,
+            "_status": "skip", "_trace": {"reason": reason}}
