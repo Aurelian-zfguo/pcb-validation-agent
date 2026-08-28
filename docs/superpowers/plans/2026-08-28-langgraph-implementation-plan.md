@@ -1855,10 +1855,10 @@ git commit -m "refactor: main.py 瘦身为 CLI 壳，流程编排交给 LangGrap
 PYTHONIOENCODING=utf-8 ".venv/Scripts/python.exe" -m pytest -q 2>&1 | tail -5
 ```
 
-Expected: **124 passed** = 既有 76 + Task 0 的 3 + 新增 graph 测试 48
-（state 3 + 装饰器 6 + load_config 5 + parse 6 + pipeline 5 + attribute 4 + report 3 + routes 11 + builder 5）。
+Expected: **127 passed** = 既有 76 + 新增 51
+（langgraph 契约 3 + state 3 + 装饰器 6 + load_config 5 + parse 6 + pipeline 5 + attribute 4 + report 3 + routes 11 + builder 5）。
 
-以 Task 0 Step 5 记录的实际既有用例数为准：最终数 = 既有数 + 3 + 48。
+以 Task 0 Step 5 记录的实际既有用例数为准：最终数 = 既有数 + 新增 graph 用例数。
 
 关键是**既有用例全绿且一个都没改过**。用下面这条确认那 16 个测试文件未被篡改
 （与仓库首个提交——即 Task 0 之前的基线——比对，不依赖中间提交个数）：
