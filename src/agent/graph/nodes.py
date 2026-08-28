@@ -8,10 +8,17 @@ import time
 import traceback
 from pathlib import Path
 
+import pandas as pd
+
 from ..config import (PROJECT_ROOT, load_field_mapping, load_settings,
                       resolve_api_key)
+from ..data_loader import discover_files, normalize_factory
 from ..engine import ValidationEngine
+from ..history_scrap import build_history_index
 from ..llm.client import MockLLMClient, OpenAICompatClient
+from ..parsers.report_parser import (ReportParseError, ReportParser,
+                                     build_product_order_index,
+                                     filter_order_by_products)
 from ..rules.replenish import RuleR2AfterBatch, RuleR3DuplicateReplenish
 from ..rules.scrap import RuleR4ScrapWithOnlineBoards
 from ..rules.warehouse_in import RuleR1WarehouseIn
@@ -102,3 +109,78 @@ def load_config(state):
         "_trace": {"provider": settings["llm"].get("provider"),
                    "llm_ready": client is not None},
     }
+
+
+@traced_node("parse")
+def parse_file(state):
+    """测试模式：直接解析 --file 指定的单个文件（搬运 main.py:82-91）。"""
+    factory = state.get("factory") or "测试"
+    parser = ReportParser(state["field_mapping"])
+    try:
+        report = parser.parse(state["file_path"], factory,
+                              state["report_type"], state.get("sheet"))
+    except ReportParseError as e:
+        return {"error": str(e), "exit_code": 2, "_status": "fail",
+                "_trace": {"error": str(e)}}
+    return {"report": report, "factory": factory,
+            "order_df": None, "hist_index": {},
+            "_trace": {"rows": len(report.df),
+                       "quality_issues": len(report.quality_issues)}}
+
+
+@traced_node("parse")
+def parse_factory(state):
+    """工厂模式：自动匹配文件 + 按工厂过滤 + 建索引（搬运 main.py:93-132）。"""
+    factory = state.get("factory")
+    if not factory:
+        msg = "未指定 --file 时，必须提供 --工厂"
+        return {"error": msg, "exit_code": 2, "_status": "fail",
+                "_trace": {"error": msg}}
+
+    files = discover_files(factory, PROJECT_ROOT,
+                           bt_files=state.get("bt_files"),
+                           order_files=state.get("order_files"),
+                           hist_files=state.get("hist_files"))
+    msgs = [f"[警告] 未找到{name}文件，对应关联字段将留空"
+            for name in ("补投", "订单") if files[name] is None]
+
+    if files["补投"] is None:
+        msg = "未找到补投明细表文件"
+        return {"error": msg, "exit_code": 2, "messages": msgs,
+                "_status": "fail", "_trace": {"error": msg}}
+
+    try:
+        bt_raw = pd.read_excel(files["补投"])
+        if "组织名称" in bt_raw.columns:
+            bt_raw = bt_raw[bt_raw["组织名称"].map(normalize_factory)
+                            == normalize_factory(factory)]
+        # 成品筛选后的补投（功能一取产品编号用）
+        bt_finished = (bt_raw[bt_raw["补料类别"] == "成品"]
+                       if "补料类别" in bt_raw.columns else bt_raw)
+
+        parser = ReportParser(state["field_mapping"])
+        report = parser.parse_df(bt_raw, factory, state["report_type"],
+                                 source_path=files["补投"])
+
+        # 订单：先读全部行（供功能一/二），再按工厂过滤（供销售单号关联）
+        order_full, order_df = None, None
+        if files["订单"]:
+            order_full = pd.read_excel(files["订单"])
+            order_df = (order_full[order_full["生产工厂"].map(normalize_factory)
+                                   == normalize_factory(factory)]
+                        if "生产工厂" in order_full.columns else order_full)
+
+        report.product_order_index = build_product_order_index(
+            filter_order_by_products(order_full, bt_finished))
+        hist_index = (build_history_index(pd.read_excel(files["报废"]))
+                      if files["报废"] else {})
+    except ReportParseError as e:
+        return {"error": str(e), "exit_code": 2, "messages": msgs,
+                "_status": "fail", "_trace": {"error": str(e)}}
+
+    return {"report": report, "order_df": order_df, "hist_index": hist_index,
+            "messages": msgs,
+            "_trace": {"rows": len(report.df),
+                       "quality_issues": len(report.quality_issues),
+                       "product_order_keys": len(report.product_order_index),
+                       "hist_keys": len(hist_index)}}
