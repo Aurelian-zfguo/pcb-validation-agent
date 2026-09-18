@@ -1,0 +1,31 @@
+# 版本控制
+.git/
+.gitignore
+
+# 虚拟环境（镜像内重新安装）
+.venv/
+
+# IDE / 缓存
+.idea/
+.vscode/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 密钥（运行时 --env-file 注入，不打进镜像）
+.env
+.env.*
+
+# 真实业务数据（运行时 volume 挂载；含敏感信息，绝不打包）
+*.xlsx
+*.xlsm
+*.xls
+*.docx
+data/
+个人工作/
+baseline/
+
+# 运行时产物（容器内生成，volume 挂出）
+output/
+logs/
+rag_logs/
