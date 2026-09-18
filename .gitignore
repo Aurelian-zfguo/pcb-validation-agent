@@ -1,6 +1,7 @@
 # 密钥（绝不入库）
 .env
 .env.*
+!.env.example
 
 # 虚拟环境（换 Python 版本即失效，不应版本化）
 .venv/
