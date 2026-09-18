@@ -8,6 +8,7 @@ llm:
 
 # B 项目知识检索服务（可选增强，服务不可用时自动降级，不影响校验主流程）
 knowledge:
+  # base_url 可被环境变量 KNOWLEDGE_BASE_URL 覆盖（容器内指向宿主 B 服务，如 http://host.docker.internal:8000）
   base_url: http://127.0.0.1:8000
   timeout_seconds: 15
 

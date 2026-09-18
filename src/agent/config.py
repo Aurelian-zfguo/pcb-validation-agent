@@ -27,7 +27,13 @@ _load_dotenv()  # 导入时即加载，保证 resolve_api_key 能读到 .env 里
 def load_settings(path: Path | None = None) -> dict:
     p = path or PROJECT_ROOT / "config" / "settings.yaml"
     with open(p, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        settings = yaml.safe_load(f)
+    # knowledge.base_url 可被环境变量 KNOWLEDGE_BASE_URL 覆盖（容器内指向宿主 B 服务）。
+    # 三层防御：setdefault 防 knowledge 缺失、.get 防 base_url 缺失、字面量兜底。
+    knowledge = settings.setdefault("knowledge", {})
+    knowledge["base_url"] = os.environ.get(
+        "KNOWLEDGE_BASE_URL", knowledge.get("base_url", "http://127.0.0.1:8000"))
+    return settings
 
 
 def load_field_mapping(path: Path | None = None) -> dict:
