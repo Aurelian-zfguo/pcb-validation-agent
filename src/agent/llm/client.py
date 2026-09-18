@@ -35,6 +35,11 @@ class OpenAICompatClient(LLMClient):
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_backoff = retry_backoff
+        self.last_finish_reason = None  # 最近一次调用的 finish_reason，供解析降级排查
+        # token 消耗统计：仅在 usage 存在时累加（Mock/异常跳过，保持 0）
+        self.call_count = 0
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
 
     def chat(self, messages: list) -> str:
         url = f"{self.base_url}/chat/completions"
@@ -42,6 +47,8 @@ class OpenAICompatClient(LLMClient):
             "model": self.model,
             "messages": messages,
             "response_format": {"type": "json_object"},  # 强制JSON对象输出
+            # DeepSeek 默认 max_tokens 较小，批量归因需要足够预算（覆盖 7 条异常详细归因）
+            "max_tokens": 4096,
         }
         headers = {
             "Content-Type": "application/json",
@@ -52,6 +59,13 @@ class OpenAICompatClient(LLMClient):
                 resp = requests.post(url, json=payload, headers=headers, timeout=self.timeout)
                 resp.raise_for_status()
                 data = resp.json()
+                self.last_finish_reason = data["choices"][0].get("finish_reason")
+                # usage 缺失（Mock 或 API 异常）时不报错，跳过统计
+                usage = data.get("usage") or {}
+                if usage:
+                    self.call_count += 1
+                    self.total_prompt_tokens += usage.get("prompt_tokens", 0)
+                    self.total_completion_tokens += usage.get("completion_tokens", 0)
                 return data["choices"][0]["message"]["content"]
             except requests.exceptions.RequestException as e:
                 # 401/403 鉴权错误不重试；其余（429限流/5xx/网络）重试

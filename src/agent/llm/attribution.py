@@ -25,6 +25,11 @@ SYSTEM_PROMPT = (
     "results 数组长度必须与输入异常项数量一致。"
 )
 
+RETRY_SYSTEM_PROMPT = SYSTEM_PROMPT + (
+    "再次强调：只输出一个纯 JSON 对象，禁止任何 markdown 代码块围栏、"
+    "禁止任何前置或后置说明文字。"
+)
+
 
 @dataclass
 class Attribution:
@@ -125,18 +130,137 @@ def build_prompt(anomalies: list[Anomaly], retriever: Retriever | None = None,
     return "以下是通过规则引擎校验出的异常项，请逐条归因：\n" + "\n\n".join(lines)
 
 
+def _strip_code_fence(text: str) -> str:
+    """剥离首尾的 markdown 代码块围栏（如 ```json ... ```）。"""
+    t = text.strip()
+    t = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", t)
+    t = re.sub(r"\s*```\s*$", "", t)
+    return t.strip()
+
+
+def _extract_json_candidate(text: str) -> str:
+    """从回复里提取最外层的 JSON 文本。
+
+    从第一个 { 或 [ 起做括号配对扫描（跳过字符串内部），找到最外层 JSON：
+    括号闭合即返回；未闭合（截断）则返回从起点到末尾，交给截断修复处理。
+    """
+    t = _strip_code_fence(text)
+    starts = [i for i in (t.find("{"), t.find("[")) if i != -1]
+    if not starts:
+        return t
+    start = min(starts)
+
+    stack = []
+    in_str = False
+    escaped = False
+    for i in range(start, len(t)):
+        ch = t[i]
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            stack.append("}")
+        elif ch == "[":
+            stack.append("]")
+        elif ch == "}":
+            if not stack or stack[-1] != "}":
+                break
+            stack.pop()
+        elif ch == "]":
+            if not stack or stack[-1] != "]":
+                break
+            stack.pop()
+        if not stack:
+            return t[start:i + 1]
+    return t[start:]  # 未闭合：截断的 JSON
+
+
+def _scan_json_delimiters(text: str):
+    """扫描 JSON 文本，返回 (未闭合的闭合符栈, 是否在字符串内截断)。
+
+    逐字符扫描并正确处理字符串内的转义与 { } [ ]，因此不会被字符串里的括号误导。
+    """
+    stack = []
+    in_str = False
+    escaped = False
+    for ch in text:
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            stack.append("}")
+        elif ch == "[":
+            stack.append("]")
+        elif ch == "}":
+            if not stack or stack[-1] != "}":
+                return [], False  # 多余闭合，结构已损坏
+            stack.pop()
+        elif ch == "]":
+            if not stack or stack[-1] != "]":
+                return [], False
+            stack.pop()
+    return stack, in_str
+
+
+def _repair_truncated_json(text: str) -> str | None:
+    """启发式修复被截断的 JSON（括号不匹配但结构完整时补全缺失的闭合符）。
+
+    严格约束：
+    1. 截断点若落在未闭合的字符串内（扫描到末尾仍在引号内），直接放弃，返回 None。
+    2. 只补全缺失的 } / ]，不做任何字段级修复。
+    3. 补全后必须由调用方 json.loads 校验；校验失败仍视为未修复。
+
+    这是启发式修复，可能失败。
+    """
+    stack, in_str = _scan_json_delimiters(text)
+    if in_str or not stack:
+        return None
+    return text + "".join(reversed(stack))
+
+
+def _detect_truncation(text: str) -> bool:
+    """检测文本是否疑似被截断（括号不平衡，或结尾落在字符串内部）。"""
+    stack, in_str = _scan_json_delimiters(_extract_json_candidate(text))
+    return in_str or bool(stack)
+
+
 def parse_json_response(text: str) -> list:
-    """从模型回复中提取JSON对象并返回其 results 数组（容忍代码块围栏等包装）。"""
-    m = re.search(r"\{[\s\S]*\}", text)
-    if not m:
-        raise ValueError(f"模型回复中未找到JSON对象: {text[:200]}")
+    """解析模型回复中的 results 数组，容错处理包裹/截断。
+
+    顺序：剥离围栏 → 提取最外层 JSON → json.loads → 截断补全再试 →
+    兼容顶层数组 → 校验 results 结构。任何失败抛 ValueError。
+    """
+    candidate = _extract_json_candidate(text)
     try:
-        parsed = json.loads(m.group(0))
-    except json.JSONDecodeError as e:
-        raise ValueError(f"JSON解析失败: {e}；原文: {text[:200]}")
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("results"), list):
-        raise ValueError(f"期望 {{results: [...]}}，实际为: {type(parsed)}")
-    return parsed["results"]
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        repaired = _repair_truncated_json(candidate)
+        if repaired is None:
+            raise ValueError(f"模型回复无法解析为JSON: {text[:200]}")
+        try:
+            parsed = json.loads(repaired)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"JSON修复后仍无法解析: {e}；原文: {text[:200]}")
+
+    if isinstance(parsed, list):
+        return parsed  # 防御性：顶层数组直接视为 results
+    if isinstance(parsed, dict) and isinstance(parsed.get("results"), list):
+        return parsed["results"]
+    raise ValueError(f"期望 {{results: [...]}}，实际为: {type(parsed)}")
 
 
 def _retrieve_knowledge(anomalies: list[Anomaly], retriever: Retriever | None) -> list:
@@ -161,21 +285,58 @@ def _with_knowledge(explanation: str, knowledge: str | None) -> str:
 
 def attribute_anomalies(anomalies: list[Anomaly], client: LLMClient,
                         retriever: Retriever | None = None) -> list[Attribution]:
-    """批量调用LLM归因。类别非法钳制为'其他'；条目缺失用fallback，不中断。"""
+    """批量调用LLM归因。类别非法钳制为'其他'；条目缺失用fallback，不中断。
+
+    三层防护：
+    1. 格式感知重试：解析失败/空结果时，用更严格的 Prompt 重试一次。
+    2. JSON 修复：parse_json_response 内部剥离围栏、截断补全、兼容顶层数组。
+    3. 降级兜底：解析彻底失败仍返回 category="未归因"，不中断、报告照出。
+    """
     if not anomalies:
         return []
     # 先统一检索一遍知识：既拼入 Prompt 供 LLM 参考，也追加到归因说明保证报告可见。
     knowledge_list = _retrieve_knowledge(anomalies, retriever)
     print(f"[知识] 检索命中 {sum(1 for k in knowledge_list if k)}/{len(anomalies)} 条")
     prompt = build_prompt(anomalies, knowledge_list=knowledge_list)
+
+    parsed, parse_failed, last_raw = [], True, ""
     try:
-        response = client.chat([
+        last_raw = client.chat([
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ])
-        parsed = parse_json_response(response)
+        parsed = parse_json_response(last_raw)
+        parse_failed = False
     except Exception:
-        parsed = []  # 模型不可用：整体降级为未归因，报告仍输出规则判定
+        parse_failed = True
+
+    # 第1层：格式感知重试（仅一次）——解析失败或返回空结果时，用更严格 Prompt 再试
+    if parse_failed or not parsed:
+        try:
+            last_raw = client.chat([
+                {"role": "system", "content": RETRY_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ])
+            parsed = parse_json_response(last_raw)
+            parse_failed = False
+        except Exception:
+            parse_failed = True
+            parsed = []
+
+    # 第3层：区分"解析失败"与"模型返回空"，并记录 finish_reason 便于排查
+    if parse_failed:
+        fr = getattr(client, "last_finish_reason", None)
+        if not last_raw:
+            reason = "LLM 调用失败，已降级"
+        elif _detect_truncation(last_raw):
+            reason = ("LLM 输出解析失败，已降级（疑似被截断"
+                      + (f"，finish_reason={fr}" if fr else "")
+                      + "）")
+        else:
+            reason = "LLM 输出解析失败，已降级（输出非 JSON）"
+    else:
+        reason = "模型未返回有效归因"
+
     attributions = []
     for i, a in enumerate(anomalies):
         knowledge = knowledge_list[i]
@@ -201,7 +362,7 @@ def attribute_anomalies(anomalies: list[Anomaly], client: LLMClient,
                 explanation=explanation,
                 suggestion=str(item.get("suggestion", ""))))
         else:
-            explanation = _with_knowledge("模型未返回有效归因，请人工复核。", knowledge)
+            explanation = _with_knowledge(reason + "，请人工复核。", knowledge)
             monitor.log_attribution(str(a.order_id), explanation)
             attributions.append(Attribution(
                 order_id=a.order_id, rule_id=a.rule_id, category="未归因",

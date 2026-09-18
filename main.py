@@ -85,6 +85,23 @@ def _finish(final: dict) -> int:
     tracer = final.get("tracer")
     if tracer is not None:
         print(f"执行日志: {tracer.file}")
+
+    client = final.get("llm_client")
+    call_count = getattr(client, "call_count", 0) if client is not None else 0
+    if call_count > 0:
+        prompt = getattr(client, "total_prompt_tokens", 0)
+        completion = getattr(client, "total_completion_tokens", 0)
+        total = prompt + completion
+        print(f"[Token 统计] 调用 {call_count} 次，Prompt {prompt} tokens，"
+              f"Completion {completion} tokens，合计 {total} tokens")
+        if tracer is not None:
+            tracer.log("llm_usage", "ok", {
+                "call_count": call_count,
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": total,
+            })
+
     monitor.generate_summary()  # 生成 rag_logs/ 的 CSV 并打印统计摘要
     return final.get("exit_code", 0)
 
