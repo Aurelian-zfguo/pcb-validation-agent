@@ -11,8 +11,8 @@ from pathlib import Path
 import pandas as pd
 from langgraph.graph import END
 
-from ..config import (PROJECT_ROOT, load_field_mapping, load_settings,
-                      resolve_api_key)
+from ..config import (PROJECT_ROOT, load_field_mapping, load_rule_config,
+                      load_settings, resolve_api_key)
 from ..data_loader import discover_files, join_order_info, normalize_factory
 from ..engine import ValidationEngine
 from ..history_scrap import (build_history_index,
@@ -54,6 +54,7 @@ def traced_node(step: str, on_error: str = "abort"):
         @functools.wraps(fn)
         def wrapper(state):
             t0 = time.perf_counter()
+
             try:
                 result = fn(state) or {}
             except Exception as e:
@@ -76,11 +77,17 @@ def traced_node(step: str, on_error: str = "abort"):
     return decorator
 
 
-def build_engine() -> ValidationEngine:
-    """从 main.py 原样搬运：注册四条规则插件。"""
+def build_engine(rule_config: dict | None = None) -> ValidationEngine:
+    """从 main.py 原样搬运：注册四条规则插件。
+
+    rule_config 为 config/rules.yaml 的规则参数（可为 None/{}），用于把会变的
+    业务阈值（如后批订单时间窗口）注入规则，改数值不动代码、不发版。
+    """
+    rule_config = rule_config or {}
     engine = ValidationEngine()
     engine.register(RuleR1WarehouseIn())
-    engine.register(RuleR2AfterBatch())
+    engine.register(RuleR2AfterBatch(
+        window_days=int(rule_config.get("r2_after_batch_window_days", 7))))
     engine.register(RuleR3DuplicateReplenish())
     engine.register(RuleR4ScrapWithOnlineBoards())
     return engine
@@ -103,6 +110,7 @@ def build_llm_client(settings: dict, use_mock: bool):
 def load_config(state):
     settings = load_settings()
     field_mapping = load_field_mapping()
+    rule_config = load_rule_config()
     trace_dir = state.get("trace_dir") or (PROJECT_ROOT / settings["trace"]["dir"])
     tracer = Tracer(trace_dir)
     client = build_llm_client(settings, state.get("use_mock", False))
@@ -110,7 +118,7 @@ def load_config(state):
         "settings": settings,
         "field_mapping": field_mapping,
         "tracer": tracer,
-        "engine": build_engine(),
+        "engine": build_engine(rule_config),
         "llm_client": client,
         "_trace": {"provider": settings["llm"].get("provider"),
                    "llm_ready": client is not None},
@@ -245,7 +253,9 @@ def attribute(state):
     retriever = functools.partial(
         retrieve_knowledge,
         base_url=kb.get("base_url", B_BASE_URL),
-        timeout=float(kb.get("timeout_seconds", B_TIMEOUT_SECONDS)))
+        timeout=float(kb.get("timeout_seconds", B_TIMEOUT_SECONDS)),
+        retry_times=int(kb.get("retry_times", 2)),
+        retry_backoff_seconds=float(kb.get("retry_backoff_seconds", 0.5)))
     attributions = attribute_anomalies(state["anomalies"], state["llm_client"],
                                        retriever=retriever)
     return {"attributions": attributions, "_trace": {"count": len(attributions)}}

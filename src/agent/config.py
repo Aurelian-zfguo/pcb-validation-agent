@@ -42,6 +42,19 @@ def load_field_mapping(path: Path | None = None) -> dict:
         return yaml.safe_load(f)
 
 
+def load_rule_config(path: Path | None = None) -> dict:
+    """读取 config/rules.yaml 的规则参数配置；文件缺失时返回 {}（不抛异常）。
+
+    与 load_field_mapping 的区别：规则配置是可选的（业务不调参数时用代码里的默认值），
+    所以缺文件要静默降级为 {}，而不是让启动失败。
+    """
+    p = path or PROJECT_ROOT / "config" / "rules.yaml"
+    if not p.exists():
+        return {}
+    with open(p, encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
 def resolve_api_key(settings: dict) -> str:
     """密钥优先级：环境变量 > settings.yaml。DeepSeek与Claude的密钥都检查。"""
     return (os.environ.get("DEEPSEEK_API_KEY", "")

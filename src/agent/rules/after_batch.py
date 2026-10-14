@@ -35,10 +35,10 @@ def _get_orders(product_code, factory, index):
     return index.get(key, [])
 
 
-def _match(orders, replenish_date, order_big_line):
+def _match(orders, replenish_date, order_big_line, window_days=7):
     """两轮匹配，返回 (状态, [匹配订单列表])。状态：'是'/'上批订单预大不足'/'否'。"""
     rep_date = _to_dt(replenish_date)
-    rep_date_7 = rep_date - datetime.timedelta(days=7) if rep_date is not None else None
+    rep_date_7 = rep_date - datetime.timedelta(days=window_days) if rep_date is not None else None
     # 第一轮：下单时间<=补料日期 且 转工单为空 且 小数位=1 且 非赠品 且 不同大行（排除自身）
     round1 = []
     for o in orders:
@@ -66,17 +66,19 @@ def _match(orders, replenish_date, order_big_line):
     return "否", []
 
 
-def check_has_after_batch(product_code, factory, replenish_date, order_big_line, index):
+def check_has_after_batch(product_code, factory, replenish_date, order_big_line, index,
+                          window_days=7):
     """判断当前补投行是否有后批订单。返回 '是'/'上批订单预大不足'/'否'/'无数据'。"""
     orders = _get_orders(product_code, factory, index)
     if not orders:
         return "无数据"
-    status, _ = _match(orders, replenish_date, order_big_line)
+    status, _ = _match(orders, replenish_date, order_big_line, window_days=window_days)
     return status
 
 
-def after_batch_big_lines(product_code, factory, replenish_date, order_big_line, index):
+def after_batch_big_lines(product_code, factory, replenish_date, order_big_line, index,
+                          window_days=7):
     """返回匹配到的后批订单「订单大行」列表（供证据）。"""
     orders = _get_orders(product_code, factory, index)
-    _, matched = _match(orders, replenish_date, order_big_line)
+    _, matched = _match(orders, replenish_date, order_big_line, window_days=window_days)
     return [str(o.get("订单大行", "")) for o in matched]

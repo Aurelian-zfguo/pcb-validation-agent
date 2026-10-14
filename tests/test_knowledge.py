@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import requests
+from types import SimpleNamespace
+
 from src.agent.llm.attribution import build_prompt
 from src.agent.llm.knowledge import build_query, retrieve_knowledge
 from src.agent.schema import Anomaly
@@ -46,3 +49,54 @@ def test_build_prompt_without_retriever_unchanged():
     prompt = build_prompt([_make_anomaly()])
     assert "【知识补充】" not in prompt
     assert "R2" in prompt
+
+
+# ─────────────────────────── 瞬时错误重试 ───────────────────────────
+
+def test_retry_then_success(monkeypatch):
+    """前两次连接失败、第三次成功：应重试到成功并返回内容。"""
+    attempts = {"n": 0}
+    good = SimpleNamespace(status_code=200,
+                           json=lambda: {"results": [{"content": "制度条文", "source": "a.md"}]})
+
+    def fake_post(*a, **k):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise requests.exceptions.ConnectionError("connection refused")
+        return good
+
+    monkeypatch.setattr("requests.post", fake_post)
+
+    got = retrieve_knowledge(_make_anomaly(), base_url="http://x",
+                             retry_times=2, retry_backoff_seconds=0)
+    assert got == "制度条文"
+    assert attempts["n"] == 3
+
+
+def test_retry_exhausted(monkeypatch):
+    """连续连接失败耗尽重试：返回 None，由上层静默降级。"""
+    def fake_post(*a, **k):
+        raise requests.exceptions.ConnectionError("connection refused")
+
+    monkeypatch.setattr("requests.post", fake_post)
+
+    got = retrieve_knowledge(_make_anomaly(), base_url="http://x",
+                             retry_times=2, retry_backoff_seconds=0)
+    assert got is None
+
+
+def test_4xx_no_retry(monkeypatch):
+    """4xx 客户端错误：不重试，直接返回 None。"""
+    attempts = {"n": 0}
+    not_found = SimpleNamespace(status_code=404)
+
+    def fake_post(*a, **k):
+        attempts["n"] += 1
+        return not_found
+
+    monkeypatch.setattr("requests.post", fake_post)
+
+    got = retrieve_knowledge(_make_anomaly(), base_url="http://x",
+                             retry_times=2, retry_backoff_seconds=0)
+    assert got is None
+    assert attempts["n"] == 1  # 4xx 不重试

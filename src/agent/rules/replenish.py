@@ -10,6 +10,10 @@ class RuleR2AfterBatch(RulePlugin):
     rule_id = "R2"
     rule_name = "违规补投（有后批订单）"
 
+    def __init__(self, window_days: int = 7):
+        # 后批订单时间窗口从 config/rules.yaml 注入，默认 7 天保持向后兼容。
+        self.window_days = window_days
+
     def validate(self, report: StandardReport) -> list[Anomaly]:
         df = report.df
         if not {"产品料号", "工厂", "补投日期", "订单号"}.issubset(df.columns):
@@ -22,12 +26,12 @@ class RuleR2AfterBatch(RulePlugin):
             order_big = str(row["订单号"]).rsplit(".", 1)[0]
             status = check_has_after_batch(
                 row["产品料号"], row["工厂"], row["补投日期"], order_big,
-                report.product_order_index)
+                report.product_order_index, window_days=self.window_days)
             if status not in ("是", "上批订单预大不足"):
                 continue
             big_lines = after_batch_big_lines(
                 row["产品料号"], row["工厂"], row["补投日期"], order_big,
-                report.product_order_index)
+                report.product_order_index, window_days=self.window_days)
             anomalies.append(Anomaly(
                 rule_id=self.rule_id, rule_name=self.rule_name,
                 factory=report.factory, order_id=str(row["订单号"]),
