@@ -9,9 +9,10 @@ PCB 工厂计划部每天要监控「预投 / 补投 / 余数入库 / 余数报�
 ## 核心能力
 
 - **4 条业务规则插件化（R1–R4）**：违规入仓 / 违规补投 / 重复补投 / 违规报废，每条规则独立文件、可插拔
+- **规则参数配置化**：会随业务变的阈值（如「后批订单时间窗口 7 天」）抽到 `config/rules.yaml`，改数值不动代码、不发版
 - **LangGraph 状态机编排**：8 节点 + 3 路由，控制流显式化、可单测
 - **LLM 归因三层防护**：格式感知重试 + JSON 修复 + 降级兜底，保证归因不丢
-- **跨服务知识检索**：调用 RAG 知识库（B 项目）获取制度依据，失败静默降级
+- **跨服务知识检索 + HTTP 边界有限重试**：调 B 项目 `/retrieve` 拿制度依据，瞬时错误（网络错/超时/5xx）指数退避重试 2 次、4xx 不重试，重试耗尽静默降级
 - **Docker CLI 容器化**：513MB 镜像，一键运行
 
 ## 技术栈
@@ -24,7 +25,7 @@ PCB 工厂计划部每天要监控「预投 / 补投 / 余数入库 / 余数报�
 | Pandas / openpyxl | 报表读写与数据处理 |
 | requests | 调用 B 项目 `/retrieve` 知识检索 |
 | Docker | CLI 模式容器化 |
-| pytest | 单元 / 集成测试（138 用例） |
+| pytest | 单元 / 集成测试（142 用例） |
 
 > 注：知识检索服务（B 项目）本身基于 FastAPI，A 项目通过 HTTP 调用它，**不在本仓库依赖内**。
 
@@ -68,7 +69,8 @@ pip install -r requirements.txt
 ### 2. 配置
 
 ```bash
-# 新建 .env（密钥不入库，.env 已被 .gitignore 排除）
+# 复制 .env.example 为 .env（密钥不入库，.env 已被 .gitignore 排除）
+copy .env.example .env          # Windows（macOS/Linux 用 cp .env.example .env）
 # 内容一行即可：
 #   DEEPSEEK_API_KEY=sk-你的密钥
 ```
@@ -107,7 +109,7 @@ docker run --rm --env-file .env \
 
 ```
 src/agent/
-├── config.py          # 配置加载：settings.yaml / field_mapping.yaml / API 密钥
+├── config.py          # 配置加载：settings.yaml / field_mapping.yaml / rules.yaml / API 密钥
 ├── schema.py          # 数据模型：StandardReport / Anomaly
 ├── data_loader.py     # 文件匹配 + 工厂归一化 + 多表关联
 ├── history_scrap.py   # 历史报废率计算（复刻 VBA，面积加权）
@@ -120,23 +122,35 @@ src/agent/
 └── trace/             # 执行日志（tracer：JSONL 溯源）
 ```
 
-顶层：`main.py`（CLI 入口）、`gui.py`（Tkinter 桌面界面，本地运行）、`config/`（两个 yaml 配置）、`tests/`（测试）。
+顶层：`main.py`（CLI 入口）、`gui.py`（Tkinter 桌面界面，本地运行）、`config/`（三个 yaml 配置）、`tests/`（测试）。
 
 ## 核心设计
 
 - **规则引擎插件化**：稽查条件会随业务调整（如「后批订单」的定义会变）。每条规则独立类、实现统一 `validate()` 接口，改判定只动一个文件、可独立测试，引擎加规则无需改。
+- **规则参数配置化**：会变的数值抽到 `config/rules.yaml`（首个就是「后批订单时间窗口 7 天」），`load_rule_config()` 读入、经 `build_engine(rule_config)` 注入规则。改阈值不动代码、不用重新发版。注意状态判定 `check_has_after_batch` 和证据 `after_batch_big_lines` 都调 `_match`，必须**同一窗口一并透传**，否则「状态用新值、证据用旧值」。
 - **LangGraph 替代线性流程**：旧版 194 行线性 `main()`，分支埋在 `if/else` 里。改成 8 节点 + 3 路由后，控制流、可观测性（逐节点耗时）、状态合并（Reducer）都「显式化」，且节点可脱离图单独单测。
 - **LLM 输出三层防护**：DeepSeek 返回不稳定（markdown 围栏、被截断、纯文本）。三层防护（格式重试 1 次 + JSON 修复 + 降级兜底）保证归因不丢、报告照出，并显式设 `max_tokens=4096` 修截断根因。
+- **重试放 HTTP 边界而非 attribute 节点**：调 B 知识库的瞬时错误重试放在 `knowledge.py: retrieve_full` 内部（网络错/超时/5xx 指数退避 2 次），不放整个 attribute 节点——因为 attribute 节点既调 B 又调 LLM，节点级重试会重复烧 LLM token。
 - **不做 Checkpointer**：项目是无环 DAG、重跑结果确定，最贵步骤（LLM 归因）重跑成本可接受；硬接需把不可序列化对象移出 State，收益不匹配（决策记录 #16）。
 
 ## 测试
 
 ```bash
-# Windows 控制台需 UTF-8，避免中文乱码
+# Windows PowerShell
+$env:PYTHONIOENCODING="utf-8"; python -m pytest
+# macOS / Linux
 PYTHONIOENCODING=utf-8 python -m pytest
 ```
 
-当前全量 **138 个用例通过**。
+当前全量 **142 个用例通过**。
+
+> 注：`conftest.py` 里打桩了 `time.sleep` 和 `requests.post`，测试不依赖 B 服务、无网络也能稳定跑。
+
+## 已知边界
+
+- **准确率/召回率金标准未跑**：`召回≥90% / 误报≤10%` 目前是设计目标，历史稽查通报做金标准的数据集尚未提供，不能用这两个数字吹成绩。
+- **`max_tokens=4096` 无独立测试**：该值在 `client.py` 显式硬编码，测试只锁了「截断 → 修复/放弃」的行为，没有用例断言这个具体值。
+- **yaml→图路径无端到端用例**：改了 `config/rules.yaml` 的窗口值跑全量仍全绿，说明参数从 yaml 注入规则的接线只有单元测试锁参数语义、没有端到端用例锁「改 yaml 真影响判定」。
 
 ## 注意事项
 
